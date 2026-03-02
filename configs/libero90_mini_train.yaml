@@ -1,0 +1,68 @@
+# Usage:
+# torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/train.py \
+#   --config_path configs/libero90_mini_train.yaml
+#
+# IMPORTANT:
+# - Set `vla.expected_world_size` == --nproc-per-node
+# - Update paths below before running.
+# - For ECoT reasoning on LIBERO, set env var before launch:
+#   export REASONING_DATASET_PATH=/abs/path/to/libero_reasonings.json
+
+vla:
+  type: prism-qwen25-dinosiglip-224px+0_5b+mx-libero-90
+
+  # Core training control
+  data_mix: libero_90
+  max_steps: 30000
+  save_every_n_steps: 1000
+
+  # Batch / distributed
+  expected_world_size: 1
+  global_batch_size: 16
+  per_device_batch_size: 4
+
+  # Optimization
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  lr_scheduler_type: constant
+  warmup_ratio: 0.0
+
+  # Mini-specific defaults
+  action_tokenizer: extra_action_tokenizer
+  image_sequence_len: 1
+  use_wrist_image: false
+
+  # Keep FSDP by default (same as codebase defaults)
+  train_strategy: fsdp-full-shard
+  enable_gradient_checkpointing: true
+  enable_mixed_precision_training: true
+  reduce_in_full_precision: true
+
+# Data / output paths
+data_root_dir: /path/to/rlds_root
+run_root_dir: /path/to/runs
+
+# Resume settings
+pretrained_checkpoint: null
+is_resume: false
+resume_step: null
+resume_epoch: null
+
+# Run metadata
+run_id: libero90-qwen05b-ecot
+run_id_note: null
+save_interval: 1000
+image_aug: false
+seed: 7
+
+# HF token file or env var name
+hf_token: .hf_token
+
+# Logging
+trackers:
+  - jsonl
+# To enable wandb, use:
+# trackers: [jsonl, wandb]
+wandb_project: mini-ecot
+wandb_entity: your_wandb_entity

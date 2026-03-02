@@ -8,6 +8,7 @@ import copy
 import inspect
 import json
 import os
+import re
 import shutil
 from functools import partial
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -37,6 +38,58 @@ overwatch = initialize_overwatch(__name__)
 
 # Configure Tensorflow with *no GPU devices* (to prevent clobber with PyTorch)
 tf.config.set_visible_devices([], "GPU")
+
+
+def _sanitize_env_key(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "_", name).upper()
+
+
+def _is_reasoning_enabled_dataset(name: str) -> bool:
+    return (name in {"bridge_dataset", "bridge", "bridge_orig"}) or ("libero" in name)
+
+
+def _resolve_reasoning_local_path(name: str, reasoning_dataset_path: str) -> str:
+    global_override = os.environ.get("REASONING_DATASET_PATH")
+    if global_override:
+        return os.path.expanduser(global_override)
+
+    per_dataset_override = os.environ.get(f"REASONING_DATASET_PATH_{_sanitize_env_key(name)}")
+    if per_dataset_override:
+        return os.path.expanduser(per_dataset_override)
+
+    if reasoning_dataset_path != "~/.cache/reasonings_dataset.json":
+        return os.path.expanduser(reasoning_dataset_path)
+
+    # Prefer a local libero reasoning file when available.
+    if "libero" in name:
+        for candidate in ("libero_reasonings.json", "../libero_reasonings.json"):
+            candidate_path = os.path.abspath(candidate)
+            if os.path.isfile(candidate_path):
+                return candidate_path
+
+    # Keep Bridge default path intact; use a dataset-specific default for Libero to avoid collisions.
+    if "libero" in name:
+        return os.path.expanduser("~/.cache/reasonings_dataset_libero_90.json")
+    return os.path.expanduser(reasoning_dataset_path)
+
+
+def _reasoning_download_sources(name: str) -> List[Tuple[str, str]]:
+    custom_repo = os.environ.get("REASONING_DATASET_REPO_ID")
+    custom_file = os.environ.get("REASONING_DATASET_FILENAME")
+    if custom_repo and custom_file:
+        return [(custom_repo, custom_file)]
+
+    if "libero" in name:
+        repo_id = "Embodied-CoT/embodied_features_and_demos_libero"
+        return [
+            (repo_id, "embodied_features_and_demos_libero_90.json"),
+            (repo_id, "embodied_features_libero_90.json"),
+            (repo_id, "reasonings_dataset_libero_90.json"),
+            (repo_id, "reasonings_dataset.json"),
+            (repo_id, "embodied_features_and_demos_libero.json"),
+        ]
+
+    return [("Embodied-CoT/embodied_features_bridge", "embodied_features_bridge.json")]
 
 
 # ruff: noqa: B006
@@ -133,82 +186,169 @@ def make_dataset_from_rlds(
     if language_key is not None:
         REQUIRED_KEYS.add(language_key)
 
-    if os.path.isfile(reasoning_dataset_path):
-        print(f"Loading from local checkpoint path `{reasoning_dataset_path}`.")
-    else:
-        print(f"Dataset file `{reasoning_dataset_path}` not found, loading from HF.")
+    # Reasonings are only available for Bridge trajectories with matching metadata keys.
+    use_reasoning_dataset = _is_reasoning_enabled_dataset(name)
+    reasoning_dataset = None
+    if use_reasoning_dataset:
+        local_reasoning_path = _resolve_reasoning_local_path(name, reasoning_dataset_path)
+        if os.path.isfile(local_reasoning_path):
+            print(f"Loading from local checkpoint path `{local_reasoning_path}`.")
+        else:
+            print(f"Dataset file `{local_reasoning_path}` not found, loading from HF.")
+            last_error: Optional[Exception] = None
+            download_path = None
+            for repo_id, filename in _reasoning_download_sources(name):
+                try:
+                    download_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset")
+                    print(f"Loaded reasoning source `{repo_id}/{filename}`.")
+                    break
+                except Exception as ex:  # noqa: BLE001
+                    last_error = ex
 
-        download_path = hf_hub_download(
-            repo_id="Embodied-CoT/embodied_features_bridge",
-            filename="embodied_features_bridge.json",
-            repo_type="dataset",
-        )
+            if download_path is None:
+                raise RuntimeError(
+                    "Could not download reasoning dataset. Set `REASONING_DATASET_PATH` to a local JSON file "
+                    "or specify `REASONING_DATASET_REPO_ID` and `REASONING_DATASET_FILENAME`."
+                ) from last_error
 
-        shutil.copyfile(download_path, reasoning_dataset_path)
+            shutil.copyfile(download_path, local_reasoning_path)
 
-    with open(reasoning_dataset_path, "r") as f:
-        reasoning_dataset = json.load(f)
+        with open(local_reasoning_path, "r") as f:
+            reasoning_dataset = json.load(f)
 
-    def make_tf_dict(raw_dict):
-        print("Building the reasoning dict...")
-        keys = []
-        values = []
+        def make_tf_dict(raw_dict):
+            print("Building the reasoning dict...")
+            keys = []
+            values = []
+            seen_keys = set()
 
-        def reasoning_dict_to_str(d):
-            tags = get_cot_tags_list()[:-1]  # exclude ACTION
-            database_keys = get_cot_database_keys()
-            reasoning_parts = [(tag, d[database_keys[tag]]) for tag in tags]
+            def append_reasoning_value(file_name, episode_id, step_id, reasoning_value):
+                file_variants = {str(file_name), os.path.basename(str(file_name))}
+                for fv in list(file_variants):
+                    file_variants.add(os.path.splitext(fv)[0])
 
-            return "@".join(f"{tag}@{part}" for tag, part in reasoning_parts)
+                for fv in file_variants:
+                    key = f"{fv}_{episode_id}_{step_id}"
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    keys.append(key)
+                    values.append(reasoning_value)
 
-        has_reasoning = [0, 0]
+            def reasoning_dict_to_str(d):
+                tags = get_cot_tags_list()[:-1]  # exclude ACTION
+                database_keys = get_cot_database_keys()
+                reasoning_parts = [(tag, d.get(database_keys[tag], "")) for tag in tags]
 
-        for file_name in raw_dict.keys():
-            for episode_id in raw_dict[file_name].keys():
-                if "reasoning" not in raw_dict[file_name][episode_id].keys():
-                    has_reasoning[0] += 1
-                    continue
+                return "@".join(f"{tag}@{part}" for tag, part in reasoning_parts)
+
+            def normalize_reasoning_dict(reasoning_dict):
+                # Bridge-format aliases
+                normalized = dict(reasoning_dict)
+                normalized["subtask_reason"] = normalized.get("subtask_reason", normalized.get("subtask_reasoning", ""))
+                normalized["move_reason"] = normalized.get("move_reason", normalized.get("movement_reasoning", ""))
+                normalized["move"] = normalized.get("move", normalized.get("movement", ""))
+
+                # Libero `plan` is often a dict of indexed steps.
+                if isinstance(normalized.get("plan"), dict):
+                    try:
+                        sorted_plan = [v for _, v in sorted(normalized["plan"].items(), key=lambda x: int(x[0]))]
+                    except Exception:  # noqa: BLE001
+                        sorted_plan = list(normalized["plan"].values())
+                    normalized["plan"] = " | ".join([str(v) for v in sorted_plan])
+                elif isinstance(normalized.get("plan"), list):
+                    normalized["plan"] = " | ".join([str(v) for v in normalized["plan"]])
+
+                # Convert richer types to strings for stable prompt serialization.
+                if isinstance(normalized.get("bboxes"), dict):
+                    normalized["bboxes"] = ", ".join([f"{k} {v}" for k, v in normalized["bboxes"].items()])
+                elif normalized.get("bboxes") is None:
+                    normalized["bboxes"] = ""
                 else:
-                    has_reasoning[1] += 1
+                    normalized["bboxes"] = str(normalized["bboxes"])
 
-                for i in raw_dict[file_name][episode_id]["reasoning"].keys():
-                    keys.append(file_name + "_" + str(episode_id) + "_" + i)
-                    reasoning_dict = raw_dict[file_name][episode_id]["reasoning"][i]
+                if normalized.get("gripper") is None:
+                    normalized["gripper"] = ""
+                elif not isinstance(normalized.get("gripper"), str):
+                    normalized["gripper"] = str(normalized["gripper"])
 
-                    gripper_lookahead_n = 5  # list this many future positions of the gripper
-                    trajectory_features = raw_dict[file_name][episode_id]["features"]
+                for field in ("task", "subtask", "subtask_reason", "move", "move_reason", "plan"):
+                    if field not in normalized or normalized[field] is None:
+                        normalized[field] = ""
+                    elif not isinstance(normalized[field], str):
+                        normalized[field] = str(normalized[field])
 
-                    reasoning_dict["gripper"] = ""
-                    if "gripper_position" in trajectory_features.keys():
-                        if trajectory_features["gripper_position"] is not None:
-                            if 0 <= int(i) < len(trajectory_features["gripper_position"]):
-                                future_positions = []
-                                for j in range(gripper_lookahead_n):
-                                    if int(i) + j < len(trajectory_features["gripper_position"]):
-                                        future_positions += trajectory_features["gripper_position"][int(i) + j]
-                                    else:
-                                        future_positions += future_positions[-2:]
+                return normalized
 
-                                reasoning_dict["gripper"] = str(future_positions)
+            def iter_episode_reasoning_steps(episode_dict):
+                # Bridge format: { ..., "reasoning": {step_id: {...}}, "features": {...}}
+                if isinstance(episode_dict, dict) and "reasoning" in episode_dict and isinstance(episode_dict["reasoning"], dict):
+                    return episode_dict["reasoning"].items(), episode_dict.get("features", {})
 
-                    reasoning_dict["bboxes"] = ""
-                    if "bboxes" in trajectory_features.keys():
-                        if trajectory_features["bboxes"] is not None:
-                            if 0 <= int(i) < len(trajectory_features["bboxes"]):
-                                if len(trajectory_features["bboxes"][int(i)]) > 0:
-                                    boxes_list = trajectory_features["bboxes"][int(i)]
-                                    reasoning_dict["bboxes"] = ", ".join(
-                                        [f"{name} {box!s}" for prob, name, box in boxes_list]
-                                    )
+                # Libero format: {step_id: {...reasoning fields...}}
+                if isinstance(episode_dict, dict):
+                    step_entries = []
+                    for k, v in episode_dict.items():
+                        if isinstance(v, dict) and (
+                            "movement_reasoning" in v
+                            or "move_reason" in v
+                            or "subtask_reasoning" in v
+                            or "subtask_reason" in v
+                            or "plan" in v
+                        ):
+                            step_entries.append((k, v))
+                    if len(step_entries) > 0:
+                        return step_entries, {}
 
-                    values.append(reasoning_dict_to_str(reasoning_dict))
+                return [], {}
 
-        print("Example reasoning:", keys[0], values[0])
-        print("Reasoning presence statistics [# has not, # has]:", has_reasoning)
+            has_reasoning = [0, 0]
 
-        return tf.lookup.StaticHashTable(tf.lookup.KeyValueTensorInitializer(keys, values), default_value="")
+            for file_name in raw_dict.keys():
+                for episode_id in raw_dict[file_name].keys():
+                    step_entries, trajectory_features = iter_episode_reasoning_steps(raw_dict[file_name][episode_id])
+                    if len(step_entries) == 0:
+                        has_reasoning[0] += 1
+                        continue
+                    else:
+                        has_reasoning[1] += 1
 
-    reasoning_dataset = make_tf_dict(reasoning_dataset)
+                    for i, raw_reasoning in step_entries:
+                        reasoning_dict = normalize_reasoning_dict(raw_reasoning)
+
+                        gripper_lookahead_n = 5  # list this many future positions of the gripper
+                        if isinstance(trajectory_features, dict):
+                            if "gripper_position" in trajectory_features.keys():
+                                if trajectory_features["gripper_position"] is not None:
+                                    if 0 <= int(i) < len(trajectory_features["gripper_position"]):
+                                        future_positions = []
+                                        for j in range(gripper_lookahead_n):
+                                            if int(i) + j < len(trajectory_features["gripper_position"]):
+                                                future_positions += trajectory_features["gripper_position"][int(i) + j]
+                                            else:
+                                                future_positions += future_positions[-2:]
+
+                                        reasoning_dict["gripper"] = str(future_positions)
+
+                            if "bboxes" in trajectory_features.keys():
+                                if trajectory_features["bboxes"] is not None:
+                                    if 0 <= int(i) < len(trajectory_features["bboxes"]):
+                                        if len(trajectory_features["bboxes"][int(i)]) > 0:
+                                            boxes_list = trajectory_features["bboxes"][int(i)]
+                                            reasoning_dict["bboxes"] = ", ".join(
+                                                [f"{name} {box!s}" for prob, name, box in boxes_list]
+                                            )
+
+                        reasoning_value = reasoning_dict_to_str(reasoning_dict)
+                        append_reasoning_value(file_name, episode_id, i, reasoning_value)
+
+            if len(keys) > 0:
+                print("Example reasoning:", keys[0], values[0])
+            print("Reasoning presence statistics [# has not, # has]:", has_reasoning)
+
+            return tf.lookup.StaticHashTable(tf.lookup.KeyValueTensorInitializer(keys, values), default_value="")
+
+        reasoning_dataset = make_tf_dict(reasoning_dataset)
 
     def restructure(traj):
         # apply a standardization function, if provided
@@ -261,13 +401,26 @@ def make_dataset_from_rlds(
                 )
             task["language_instruction"] = traj.pop(language_key)
 
-        file_name = traj["traj_metadata"]["episode_metadata"]["file_path"][0]
-        episode_id = traj["traj_metadata"]["episode_metadata"]["episode_id"][0]
+        reasonings = tf.repeat("", traj_len)
+        if use_reasoning_dataset and reasoning_dataset is not None and "traj_metadata" in traj:
+            episode_metadata = traj["traj_metadata"].get("episode_metadata", traj["traj_metadata"])
+            file_key = next((k for k in ("file_path", "file_name", "source_file", "file") if k in episode_metadata), None)
+            episode_key = next((k for k in ("episode_id", "ep_id", "episode_idx") if k in episode_metadata), None)
 
-        file_names = tf.repeat(file_name, traj_len)
-        episode_ids = tf.as_string(tf.repeat(episode_id, traj_len))
-        indices = tf.as_string(tf.range(traj_len))
-        reasonings = reasoning_dataset.lookup(file_names + "_" + episode_ids + "_" + indices)
+            if file_key is not None and episode_key is not None:
+                file_name = episode_metadata[file_key][0]
+                episode_id = episode_metadata[episode_key][0]
+                file_names = tf.repeat(file_name, traj_len)
+                episode_ids = tf.as_string(tf.repeat(episode_id, traj_len))
+                indices = tf.as_string(tf.range(traj_len))
+                lookup_key = file_names + "_" + episode_ids + "_" + indices
+                reasonings = reasoning_dataset.lookup(lookup_key)
+
+                # Fallback: reasoning json may only store basename while RLDS stores a full path.
+                file_names_basename = tf.strings.regex_replace(file_names, r"^.*[\\/]", "")
+                lookup_key_basename = file_names_basename + "_" + episode_ids + "_" + indices
+                reasonings_basename = reasoning_dataset.lookup(lookup_key_basename)
+                reasonings = tf.where(tf.equal(reasonings, ""), reasonings_basename, reasonings)
 
         traj = {
             "observation": new_obs,

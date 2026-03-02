@@ -84,6 +84,7 @@ class TrainConfig:
         """Lift optimization parameters from `self.vla` for ease of use =>> validate on `expected_world_size`"""
         self.epochs = self.vla.epochs
         self.max_steps = self.vla.max_steps
+        self.save_every_n_steps = self.vla.save_every_n_steps
         self.global_batch_size = self.vla.global_batch_size
         self.per_device_batch_size = self.vla.per_device_batch_size
 
@@ -94,6 +95,9 @@ class TrainConfig:
         self.warmup_ratio = self.vla.warmup_ratio
 
         self.train_strategy = self.vla.train_strategy
+        self.action_tokenizer = self.vla.action_tokenizer
+        self.image_sequence_len = self.vla.image_sequence_len
+        self.use_wrist_image = self.vla.use_wrist_image
 
         # [Validate] Assert on `expected_world_size`
         assert (
@@ -147,10 +151,20 @@ def train(cfg: TrainConfig) -> None:
             assert int(re.search("step-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_step
             assert int(re.search("epoch-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_epoch
 
-        vlm = load_vla(cfg.pretrained_checkpoint, hf_token=hf_token, load_for_training=True)
+        vlm = load_vla(
+            cfg.pretrained_checkpoint,
+            hf_token=hf_token,
+            load_for_training=True,
+            image_sequence_len=cfg.image_sequence_len,
+        )
 
     else:
-        vlm = load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True)
+        vlm = load(
+            cfg.vla.base_vlm,
+            hf_token=hf_token,
+            load_for_training=True,
+            image_sequence_len=cfg.image_sequence_len,
+        )
 
     # [Validate] Model should be in Full Precision!
     for param in vlm.parameters():
@@ -197,6 +211,9 @@ def train(cfg: TrainConfig) -> None:
         default_image_resolution=vlm.vision_backbone.default_image_resolution,
         shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
         image_aug=cfg.image_aug,
+        action_tokenizer=cfg.action_tokenizer,
+        image_window_size=cfg.image_sequence_len // 2 if cfg.use_wrist_image else cfg.image_sequence_len,
+        use_wrist_image=cfg.use_wrist_image,
     )
 
     # Save dataset statistics for de-normalization at inference time
@@ -246,7 +263,7 @@ def train(cfg: TrainConfig) -> None:
         collator,
         action_tokenizer,
         metrics,
-        save_interval=cfg.save_interval,
+        save_interval=cfg.save_every_n_steps if cfg.save_every_n_steps is not None else cfg.save_interval,
     )
 
     # Finalize

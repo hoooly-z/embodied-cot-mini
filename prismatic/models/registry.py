@@ -616,6 +616,32 @@ MODEL_REGISTRY = {
             "train_epochs": 2,
         }
     },
+    "prism-qwen25-dinosiglip-224px+0_5b": {
+        "model_id": "prism-qwen25-dinosiglip-224px+0_5b",
+        "names": ["Prism-DINOSigLIP 224px w/ Qwen2.5 0.5B"],
+        "description": {
+            "name": "DINOSigLIP 224px Qwen2.5 0.5B",
+            "optimization_procedure": "single-stage",
+            "visual_representation": "DINOv2 ViT-L/14 + SigLIP ViT-SO 14 @ 224px",
+            "image_processing": "Naive Resize",
+            "language_model": "Qwen2.5 0.5B",
+            "datasets": ["LLaVa v1.5 Instruct", "LVIS-Instruct-4V", "LRV-Instruct"],
+            "train_epochs": 2,
+        }
+    },
+    "prism-qwen25-extra-dinosiglip-224px+0_5b": {
+        "model_id": "prism-qwen25-extra-dinosiglip-224px+0_5b",
+        "names": ["Prism-DINOSigLIP 224px w/ Qwen2.5 0.5B"],
+        "description": {
+            "name": "DINOSigLIP 224px Qwen2.5 0.5B",
+            "optimization_procedure": "single-stage",
+            "visual_representation": "DINOv2 ViT-L/14 + SigLIP ViT-SO 14 @ 224px",
+            "image_processing": "Naive Resize",
+            "language_model": "Qwen2.5 0.5B",
+            "datasets": ["LLaVa v1.5 Instruct", "LVIS-Instruct-4V", "LRV-Instruct"],
+            "train_epochs": 2,
+        }
+    },
 
     # === Additional LLM Backbones ===
     "llama2-chat+7b": {

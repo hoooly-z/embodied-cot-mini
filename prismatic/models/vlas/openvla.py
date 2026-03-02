@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL.Image import Image as Img
 from transformers import LlamaTokenizerFast
+from transformers.models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
 
 from experiments.bridge.reasoning_client import ReasoningClient
 from prismatic.models.vlms.prismatic import PrismaticVLM
@@ -73,7 +74,7 @@ class OpenVLA(PrismaticVLM):
     @torch.inference_mode()
     def predict_action(
         self,
-        image: Image,
+        image: Union[Img, List[Img]],
         instruction: str,
         unnorm_key: Optional[str] = None,
         info_dict: Optional[dict] = None,
@@ -89,7 +90,7 @@ class OpenVLA(PrismaticVLM):
 
         @return Unnormalized (continuous) action vector --> end-effector deltas.
         """
-        image_transform, tokenizer = self.vision_backbone.image_transform, self.llm_backbone.tokenizer
+        image_transform, tokenizer = self.vision_backbone.get_image_transform(), self.llm_backbone.tokenizer
 
         # Build VLA prompt
         prompt_builder = self.get_prompt_builder()
@@ -100,17 +101,23 @@ class OpenVLA(PrismaticVLM):
         init_input_ids = tokenizer(prompt_text, truncation=True, return_tensors="pt").input_ids.to(self.device)
 
         def build_prompt(prompt_prefix, input_ids):
+            prompt_ids = tokenizer(prompt_prefix, return_tensors="pt").input_ids.to(self.device)
             if isinstance(tokenizer, LlamaTokenizerFast):
                 # Note: We start the answer with "TASK:" to force generating the reasoning part.
-                return torch.cat(
-                    (
-                        input_ids,
-                        tokenizer(prompt_prefix, return_tensors="pt").input_ids.to(self.device)[:, 1:],
-                    ),
-                    dim=1,
-                )
+                suffix_ids = prompt_ids[:, 1:]
+            elif isinstance(tokenizer, Qwen2TokenizerFast):
+                # Qwen may include a BOS token when tokenizing standalone prefixes.
+                if tokenizer.bos_token_id is not None and prompt_ids.shape[1] > 0:
+                    if prompt_ids[0, 0].item() == tokenizer.bos_token_id:
+                        prompt_ids = prompt_ids[:, 1:]
+                suffix_ids = prompt_ids
             else:
                 raise ValueError(f"Unsupported `tokenizer` type = {type(tokenizer)}")
+
+            if suffix_ids.shape[1] == 0:
+                return input_ids
+
+            return torch.cat((input_ids, suffix_ids), dim=1)
 
         # Preprocess Image
         pixel_values = image_transform(image)
