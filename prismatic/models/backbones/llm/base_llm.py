@@ -119,15 +119,17 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
         #   => Note: We're eschewing use of the AutoModel API so that we can be more explicit about LLM-specific details
         if not self.inference_mode:
             overwatch.info(f"Loading [bold]{llm_family}[/] LLM from [underline]`{hf_hub_path}`[/]", ctx_level=1)
-            self.llm = llm_cls.from_pretrained(
-                hf_hub_path,
-                token=hf_token,
-                use_flash_attention_2=use_flash_attention_2 if not self.inference_mode else False,
+            model_kwargs = {
+                "token": hf_token,
                 # The following parameters are set to prevent `UserWarnings` from HF; we want greedy decoding!
-                do_sample=False,
-                temperature=1.0,
-                top_p=1.0,
-            )
+                "do_sample": False,
+                "temperature": 1.0,
+                "top_p": 1.0,
+            }
+            if use_flash_attention_2:
+                model_kwargs["attn_implementation"] = "flash_attention_2"
+
+            self.llm = llm_cls.from_pretrained(hf_hub_path, **model_kwargs)
 
         # [Contract] `inference_mode` means we're loading from a pretrained checkpoint; no need to load base weights!
         else:
