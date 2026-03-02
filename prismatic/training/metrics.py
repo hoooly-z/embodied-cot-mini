@@ -249,6 +249,8 @@ class VLAMetrics:
             "l1_loss": deque(maxlen=window_size),
             "action_accuracy": deque(maxlen=window_size),
             "cot_accuracy": deque(maxlen=window_size),
+            "action_token_ce_loss": deque(maxlen=window_size),
+            "cot_token_ce_loss": deque(maxlen=window_size),
             "step_time": deque(maxlen=window_size),
             "lr": [],
         }
@@ -318,6 +320,8 @@ class VLAMetrics:
         l1_loss = torch.stack(list(self.state["l1_loss"])).mean().item()
         action_accuracy = torch.stack(list(self.state["action_accuracy"])).mean().item()
         cot_accuracy = torch.stack(list(self.state["cot_accuracy"])).mean().item()
+        action_token_ce_loss = torch.stack(list(self.state["action_token_ce_loss"])).mean().item()
+        cot_token_ce_loss = torch.stack(list(self.state["cot_token_ce_loss"])).mean().item()
         step_time, lr = np.mean(list(self.state["step_time"])), self.state["lr"][-1]
         status = self.get_status(loss)
 
@@ -347,6 +351,8 @@ class VLAMetrics:
                 f"{prefix}/Step": self.global_step,
                 f"{prefix}/Epoch": self.epoch,
                 f"{prefix}/Loss": loss,
+                f"{prefix}/Action Token CE Loss": action_token_ce_loss,
+                f"{prefix}/CoT Token CE Loss": cot_token_ce_loss,
                 f"{prefix}/L1 Loss": l1_loss,
                 f"{prefix}/Action Token Accuracy": action_accuracy,
                 f"{prefix}/CoT Token Accuracy": cot_accuracy,
