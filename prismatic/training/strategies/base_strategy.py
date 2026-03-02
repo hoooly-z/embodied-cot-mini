@@ -14,6 +14,7 @@ from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
 from tqdm import tqdm
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -401,6 +402,18 @@ class TrainingStrategy(ABC):
                 correct_action_preds = (token_preds == token_gt) & action_mask
                 action_accuracy = correct_action_preds.sum().float() / action_mask.sum().float()
 
+                # Compute cross-entropy restricted to action / CoT token positions.
+                aligned_logits = output.logits[:, self.vlm.vision_backbone.num_patches : -1]
+                vocab_size = aligned_logits.shape[-1]
+
+                if action_mask.any():
+                    action_token_ce_loss = F.cross_entropy(
+                        aligned_logits[action_mask].reshape(-1, vocab_size),
+                        token_gt[action_mask].reshape(-1),
+                    )
+                else:
+                    action_token_ce_loss = torch.zeros((), device=aligned_logits.device, dtype=aligned_logits.dtype)
+
                 # Compute L1 Loss on Predicted (Continuous) Actions
                 continuous_actions_pred = torch.tensor(
                     action_tokenizer.decode_token_ids_to_actions(token_preds[action_mask].cpu().numpy())
@@ -414,11 +427,20 @@ class TrainingStrategy(ABC):
                 cot_mask = (token_gt > EOS_TOKEN) & ~action_mask
                 correct_cot_preds = (token_preds == token_gt) & cot_mask
                 cot_accuracy = correct_cot_preds.sum().float() / cot_mask.sum().float()
+                if cot_mask.any():
+                    cot_token_ce_loss = F.cross_entropy(
+                        aligned_logits[cot_mask].reshape(-1, vocab_size),
+                        token_gt[cot_mask].reshape(-1),
+                    )
+                else:
+                    cot_token_ce_loss = torch.zeros((), device=aligned_logits.device, dtype=aligned_logits.dtype)
 
                 # Commit Metrics
                 metrics.commit(
                     action_accuracy=action_accuracy,
                     cot_accuracy=cot_accuracy,
+                    action_token_ce_loss=action_token_ce_loss,
+                    cot_token_ce_loss=cot_token_ce_loss,
                     l1_loss=action_l1_loss,
                     update_step_time=True,
                 )
