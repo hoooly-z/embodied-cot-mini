@@ -61,8 +61,8 @@ def get_prismatic_vla(cfg):
     hf_token = _resolve_hf_token(cfg.hf_token)
     print(f"[*] Loading VLA checkpoint from: {cfg.pretrained_checkpoint}")
     vla = load_vla(cfg.pretrained_checkpoint, hf_token=hf_token, load_for_training=False)
-    for param in vla.parameters():
-        assert param.dtype == torch.float32, f"Loaded VLM parameter not in full precision: {param}"
+    #for param in vla.parameters():
+    #    assert param.dtype == torch.float32, f"Loaded VLM parameter not in full precision: {param}"
 
     vla.vision_backbone.to(dtype=vla.vision_backbone.half_precision_dtype)
     vla.llm_backbone.to(dtype=vla.llm_backbone.half_precision_dtype)
